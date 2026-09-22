@@ -11,7 +11,6 @@ from ai_engine import ask_ai
 def normalize_test_case_type(value):
     if str(value).strip().lower() == "positive":
         return "Positive"
-
     return "Negative"
 
 
@@ -71,16 +70,13 @@ def normalize_coverage_score(value):
 
 def clean_test_data(test_data):
     """
-    Convert AI test data into a readable string
-    matching the company's test case format.
+    Convert AI test data into a readable string.
     """
 
     if isinstance(test_data, dict):
-
         parts = []
 
         for key, value in test_data.items():
-
             readable_key = (
                 str(key)
                 .replace("_", " ")
@@ -94,28 +90,22 @@ def clean_test_data(test_data):
         return "; ".join(parts)
 
     if isinstance(test_data, list):
-
         return "; ".join(
             str(item)
             for item in test_data
         )
 
     if test_data is None:
-
         return "Required test data"
 
     return str(test_data)
 
 
 # ============================================================
-# BASIC QUALITY VALIDATION
+# BASIC VALIDATION
 # ============================================================
 
 def is_valid_test_case(test_case):
-    """
-    Reject obviously malformed or incomplete AI test cases.
-    """
-
     if not isinstance(test_case, dict):
         return False
 
@@ -126,7 +116,6 @@ def is_valid_test_case(test_case):
     ]
 
     for field in required_fields:
-
         value = test_case.get(field)
 
         if value is None:
@@ -142,451 +131,658 @@ def is_valid_test_case(test_case):
 # DUPLICATE DETECTION
 # ============================================================
 
-def is_duplicate_case(existing_cases, new_case):
-    """
-    Prevent duplicate or almost identical test scenarios.
-    """
-
-    new_text = (
-        str(new_case.get("test_case", ""))
+def normalize_text(value):
+    return " ".join(
+        str(value)
         .strip()
         .lower()
+        .split()
+    )
+
+
+def is_duplicate_case(existing_cases, new_case):
+    """
+    Prevent duplicate scenarios.
+    """
+
+    new_text = normalize_text(
+        new_case.get("test_case", "")
+    )
+
+    new_module = normalize_text(
+        new_case.get("module", "")
     )
 
     for existing in existing_cases:
 
-        existing_text = (
-            str(existing.get("test_case", ""))
-            .strip()
-            .lower()
+        existing_text = normalize_text(
+            existing.get("test_case", "")
         )
 
-        if new_text == existing_text:
+        existing_module = normalize_text(
+            existing.get("module", "")
+        )
+
+        if (
+            new_text == existing_text
+            and new_module == existing_module
+        ):
             return True
 
     return False
 
 
 # ============================================================
-# MAIN AI ANALYSIS
+# SAFE JSON PARSING
 # ============================================================
 
-def analyze_requirement_with_ai(
-    requirement: str,
-    coverage_mode: str = "standard"
-):
+def parse_ai_json(response):
+    """
+    Safely parse JSON returned by Ollama.
+    """
+
+    try:
+        return json.loads(response)
+
+    except json.JSONDecodeError:
+
+        # Try extracting the first JSON object.
+        start = response.find("{")
+        end = response.rfind("}")
+
+        if start != -1 and end != -1 and end > start:
+
+            try:
+                return json.loads(
+                    response[start:end + 1]
+                )
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+# ============================================================
+# STAGE 1
+# REQUIREMENT / MODULE DISCOVERY
+# ============================================================
+
+def discover_requirement_modules(requirement):
+    """
+    First AI stage.
+
+    Understand the complete requirement and identify
+    all meaningful modules/features before generating
+    test cases.
+    """
 
     prompt = f"""
-You are MSSPL SmartQA.
+You are MSSPL SmartQA, an AI assistant for professional
+manual software testers.
 
-You are an AI-powered assistant designed specifically
-for professional Manual Software Testers.
+Your FIRST task is NOT to generate test cases.
 
-Your task is to deeply understand the provided software
-requirement and identify the COMPLETE set of meaningful
-manual testing scenarios supported by that requirement.
+Your task is to deeply analyze the COMPLETE software
+requirement and identify ALL meaningful modules,
+features, screens, workflows, or functional areas
+described in it.
 
 ============================================================
-SOFTWARE REQUIREMENT
+COMPLETE SOFTWARE REQUIREMENT
 ============================================================
 
 {requirement}
 
 ============================================================
+IMPORTANT
+============================================================
+
+Read the ENTIRE requirement before responding.
+
+Do not stop after finding the first module.
+
+For a large requirement such as an administration portal,
+the requirement may contain many areas such as:
+
+- Authentication
+- Parent management
+- Wallet
+- Children
+- Meal ordering
+- Teachers
+- Students
+- Schools
+- Calendar
+- Menu
+- Products
+- Classes
+- Reports
+- Navigation
+- Session management
+
+These are only examples.
+
+You MUST identify the actual modules present in the
+provided requirement.
+
+============================================================
+GROUNDING RULE
+============================================================
+
+The requirement is the source of truth.
+
+Do NOT invent modules.
+
+Only identify a module when its functionality is
+explicitly present in the requirement.
+
+Do NOT invent:
+
+- business rules
+- validation rules
+- technical specifications
+- database behavior
+- permissions
+- timeout values
+- retry counts
+- security policies
+- UI behavior not mentioned
+- exact limits
+
+============================================================
+MODULE REQUIREMENTS
+============================================================
+
+For every identified module provide:
+
+1. module name
+2. concise description
+3. actors involved, if explicitly stated or directly
+   inferable
+4. the exact relevant requirement content needed to
+   understand that module
+5. important functional areas within that module
+
+Do not generate test cases yet.
+
+============================================================
+OUTPUT
+============================================================
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
+
+{{
+    "modules": [
+        {{
+            "module": "Module name",
+            "description": "What this module does",
+            "actor": "Primary actor",
+            "requirement_excerpt": "Relevant requirement content",
+            "functional_areas": [
+                "Functional area 1",
+                "Functional area 2"
+            ]
+        }}
+    ],
+    "global_missing_information": [
+        "Missing or unclear requirement"
+    ]
+}}
+
+The module list must cover the COMPLETE requirement.
+
+Do not return only the first module.
+"""
+
+    response = ask_ai(prompt)
+
+    result = parse_ai_json(response)
+
+    if not isinstance(result, dict):
+        return {
+            "modules": [],
+            "global_missing_information": [
+                "AI returned an unexpected module analysis."
+            ]
+        }
+
+    modules = result.get("modules", [])
+
+    if not isinstance(modules, list):
+        modules = []
+
+    cleaned_modules = []
+
+    for module in modules:
+
+        if not isinstance(module, dict):
+            continue
+
+        name = str(
+            module.get("module", "")
+        ).strip()
+
+        if not name:
+            continue
+
+        cleaned_modules.append({
+            "module": name,
+            "description": str(
+                module.get("description", "")
+            ).strip(),
+            "actor": str(
+                module.get("actor", "User")
+            ).strip(),
+            "requirement_excerpt": str(
+                module.get("requirement_excerpt", "")
+            ).strip(),
+            "functional_areas": (
+                module.get("functional_areas", [])
+                if isinstance(
+                    module.get("functional_areas", []),
+                    list
+                )
+                else []
+            )
+        })
+
+    return {
+        "modules": cleaned_modules,
+        "global_missing_information": (
+            result.get(
+                "global_missing_information",
+                []
+            )
+            if isinstance(
+                result.get(
+                    "global_missing_information",
+                    []
+                ),
+                list
+            )
+            else []
+        )
+    }
+
+
+# ============================================================
+# STAGE 2
+# MODULE-FOCUSED TEST SCENARIO GENERATION
+# ============================================================
+
+def generate_module_test_cases(
+    module_batch,
+    global_missing_information
+):
+    """
+    Generate test cases for a focused group of modules.
+
+    Multiple modules are processed in one AI call to reduce
+    latency while keeping the context focused.
+    """
+
+    module_json = json.dumps(
+        module_batch,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    prompt = f"""
+You are MSSPL SmartQA.
+
+You are an expert manual software testing assistant.
+
+Your task is to generate the COMPLETE set of meaningful
+manual test scenarios for the supplied functional modules.
+
+============================================================
+MODULES TO ANALYZE
+============================================================
+
+{module_json}
+
+============================================================
+GLOBAL MISSING INFORMATION
+============================================================
+
+{json.dumps(
+    global_missing_information,
+    ensure_ascii=False,
+    indent=2
+)}
+
+============================================================
 PRIMARY OBJECTIVE
 ============================================================
 
-First understand the complete requirement.
+Analyze EVERY supplied module.
 
-Then identify ALL meaningful test scenarios supported
-by the requirement.
+Do NOT focus on only the first module.
 
-There is NO TEST CASE COUNT LIMIT during this analysis.
+For EACH module, identify all meaningful scenarios
+supported by its requirement excerpt.
 
-Do NOT optimize for a fixed number of test cases.
+Generate scenarios for all meaningful functionality
+described in the module.
 
-Do NOT generate artificial scenarios just to increase
-the number of test cases.
+There is NO artificial test-case count limit.
 
-The complete scenario pool will later be filtered by
-MSSPL SmartQA into:
-
-Quick
-Standard
-Comprehensive
-
-Therefore, IGNORE coverage_mode while creating the
-complete scenario pool.
-
-Current coverage_mode received from the application:
-
-{coverage_mode}
-
-This value must NOT restrict the AI analysis.
+Do NOT create artificial cases simply to increase the
+number of scenarios.
 
 ============================================================
-MOST IMPORTANT RULE: REQUIREMENT IS THE SOURCE OF TRUTH
+REQUIREMENT IS THE SOURCE OF TRUTH
 ============================================================
 
-You MUST stay grounded in the provided requirement.
-
-Only generate a test scenario when the behavior is:
+Only generate a scenario when it is:
 
 1. Explicitly stated in the requirement, OR
 2. A direct and unavoidable consequence of the stated
    functionality.
 
-Do NOT invent business rules.
+Do NOT invent:
 
-Do NOT invent validation rules.
-
-Do NOT invent technical specifications.
-
-Do NOT invent exact limits.
-
-Do NOT invent workflows.
-
-Do NOT invent security policies.
-
-Do NOT invent timeout values.
-
-Do NOT invent retry counts.
-
-Do NOT invent permissions.
-
-Do NOT invent database behavior.
-
-Do NOT invent UI behavior unless it is stated.
+- business rules
+- validation rules
+- technical specifications
+- exact limits
+- timeout values
+- retry counts
+- permissions
+- database behavior
+- unsupported security rules
+- unsupported UI behavior
+- unsupported workflows
 
 ============================================================
-EXAMPLES OF INFORMATION THAT MUST NOT BE INVENTED
+NEGATIVE TESTING
 ============================================================
+
+Negative testing is required where the requirement
+supports it.
+
+Example:
 
 If the requirement says:
 
-"User logs in with email and password."
+"Student cannot be deleted without confirmation."
 
-Do NOT automatically create scenarios such as:
+Valid negative scenario:
+
+"Attempt to delete a student and cancel the confirmation."
+
+But do NOT invent:
+
+"Delete fails after 3 attempts"
+
+unless that behavior is specified.
+
+============================================================
+COVERAGE
+============================================================
+
+Where supported by the requirement, consider:
+
+- Main functional flow
+- Alternate flow
+- Negative flow
+- Boundary behavior explicitly described
+- Search
+- Clear
+- Sort
+- Filter
+- Add
+- Edit
+- Delete
+- Confirmation
+- Navigation
+- State changes
+- Empty states
+- Required fields
+- Existing-data behavior
+- Date behavior
+- Session behavior
+- Role behavior
+
+ONLY include an area when it is actually supported
+by the module requirement.
+
+============================================================
+IMPORTANT EXAMPLE
+============================================================
+
+If a login requirement says:
+
+"Admin logs in using username and password."
+
+Generate:
+
+- successful login
+- invalid username/password behavior IF the requirement
+  specifies it
+
+Do NOT invent:
 
 - password must contain 8 characters
 - password must contain a number
 - password must contain a special character
-- email must have a specific maximum length
-- login timeout after 30 seconds
-- account locked after 3 attempts
-- CAPTCHA appears
-- password expires
-- remember-me functionality
+- account locks after 3 attempts
+- CAPTCHA
+- password expiration
+- login timeout
 
-unless the requirement explicitly mentions them.
-
-Instead, missing rules should be reported under:
-
-"missing_information"
+unless specified.
 
 ============================================================
-MEANINGFUL NEGATIVE TESTING
-============================================================
-
-Negative scenarios are important, but they must remain
-connected to the stated functionality.
-
-For example:
-
-Requirement:
-"Email address must be unique."
-
-Meaningful negative scenario:
-
-"Attempt registration using an email address that already
-exists."
-
-That is valid because uniqueness is explicitly required.
-
-But:
-
-"Attempt registration with an email longer than 50 characters"
-
-is NOT valid unless a 50-character limit is specified.
-
-============================================================
-FUNCTIONAL FLOW COVERAGE
-============================================================
-
-Read the ENTIRE requirement.
-
-If multiple flows are described, cover all of them.
-
-For example:
-
-"Customer creates an account and then logs in using the
-registered credentials."
-
-The scenario pool should cover BOTH:
-
-Registration
-AND
-Login
-
-Do not focus only on registration.
-
-============================================================
-DUPLICATE SCENARIOS
-============================================================
-
-Do not create duplicate or nearly identical scenarios.
-
-Each test case must provide meaningful additional coverage.
-
-============================================================
-TEST CASE CLASSIFICATION
+TEST CASE FORMAT
 ============================================================
 
 Every test case must contain:
 
-priority
+- module
+- test_case_type
+- test_case
+- test_data
+- expected_result
+- priority
+- coverage_level
 
-and
-
-coverage_level
-
-Priority values:
+Priority:
 
 Critical
 High
 Medium
 Low
 
-Coverage level values:
+Coverage level:
 
 Core
 Important
 Extended
 Edge
 
-============================================================
-PRIORITY GUIDELINES
-============================================================
-
-Critical:
-A fundamental required business flow.
-
-High:
-Important negative, validation, business-rule,
-or alternate-flow scenarios.
-
-Medium:
-Additional meaningful functional coverage.
-
-Low:
-Less common but still meaningful edge scenarios.
-
-Do not classify everything as Critical.
+Do not classify every scenario as Critical.
 
 ============================================================
-COVERAGE LEVEL GUIDELINES
+TEST DATA
 ============================================================
 
-Core:
-Essential functionality explicitly required.
+Test data must match the scenario.
 
-Important:
-Important negative, validation, business-rule,
-or alternate scenarios.
-
-Extended:
-Additional meaningful scenarios that improve coverage.
-
-Edge:
-Less common but valid scenarios supported by the requirement.
+Do not create contradictory test data.
 
 ============================================================
-COMPANY TEST CASE FORMAT
+EXPECTED RESULT
 ============================================================
 
-MSSPL uses this test case format:
+Expected results MUST be supported by the requirement.
 
-Date
-Test Case ID
-Module
-Test Case Type
-Test Case
-Test Data
-Expected Result
-
-Priority and Coverage Level are INTERNAL SmartQA
-metadata.
-
-They are NOT company-facing columns.
-
-The Python application will generate the Date.
-
-Therefore:
-
-DO NOT generate the date yourself.
-
-============================================================
-TEST DATA RULES
-============================================================
-
-Test data must match the actual test scenario.
-
-For example:
-
-Scenario:
-"Attempt login with incorrect password."
-
-Correct:
-
-Email: registered@example.com
-Password: IncorrectPassword
-
-Do not provide test data that contradicts the scenario.
-
-============================================================
-EXPECTED RESULT RULES
-============================================================
-
-Expected results must be based on the requirement.
-
-Do not claim unsupported UI behavior.
-
-For example, if the requirement only says:
-
-"User can log in successfully."
-
-Use:
-
-"User should be logged in successfully."
-
-Do not invent:
-
-"User should be redirected to dashboard."
-
-unless the requirement explicitly says so.
-
-============================================================
-COVERAGE SCORE
-============================================================
-
-coverage_score represents estimated requirement coverage
-provided by the generated scenario pool.
-
-It is NOT software quality.
-
-Use an integer between 0 and 100.
-
-Do not automatically return 100.
+Do not invent redirects, messages, UI states, database
+changes, or technical behavior unless stated.
 
 ============================================================
 MISSING INFORMATION
 ============================================================
 
-List genuinely missing or unclear requirements.
+If an important rule is missing from the requirement,
+report it under missing_information.
 
-Examples:
-
-- Password complexity rules are not specified.
-- Login failure behavior is not specified.
-- Email format validation rules are not specified.
-
-Do not convert missing information into invented test cases.
+Do NOT convert missing information into an invented
+test case.
 
 ============================================================
-COVERAGE GAPS
-============================================================
-
-Identify meaningful areas that cannot be fully tested because
-the requirement does not provide enough information.
-
-============================================================
-OUTPUT FORMAT
+OUTPUT
 ============================================================
 
 Return ONLY valid JSON.
 
-Return exactly:
+Use this structure:
 
 {{
-    "module": "Relevant module",
-    "actor": "Primary actor",
-    "complexity": "Low / Medium / High",
-    "coverage_score": 0,
-    "scenario_count": 0,
-
-    "functional_requirements": [
-        "Requirement explicitly identified from the story"
-    ],
-
-    "qa_risks": [
-        "Important QA risk supported by the requirement"
-    ],
-
-    "missing_information": [
-        "Missing or unclear information"
-    ],
-
-    "coverage_gaps": [
-        "Potential remaining coverage gap"
-    ],
-
-    "test_cases": [
+    "modules": [
         {{
-            "test_case_id": "TC_001",
             "module": "Module name",
-            "test_case_type": "Positive",
-            "test_case": "Manual test scenario",
-            "test_data": "Required test data",
-            "expected_result": "Specific expected result",
-            "priority": "Critical",
-            "coverage_level": "Core"
+            "actor": "Primary actor",
+            "complexity": "Low / Medium / High",
+            "coverage_score": 0,
+            "functional_requirements": [
+                "Explicit functional requirement"
+            ],
+            "qa_risks": [
+                "Requirement-supported QA risk"
+            ],
+            "missing_information": [
+                "Missing information"
+            ],
+            "coverage_gaps": [
+                "Coverage gap caused by unclear requirement"
+            ],
+            "test_cases": [
+                {{
+                    "module": "Module name",
+                    "test_case_type": "Positive",
+                    "test_case": "Manual test scenario",
+                    "test_data": "Required test data",
+                    "expected_result": "Expected result",
+                    "priority": "Critical",
+                    "coverage_level": "Core"
+                }}
+            ]
         }}
     ]
 }}
 
-============================================================
-FINAL SELF-CHECK BEFORE RETURNING JSON
-============================================================
+FINAL CHECK:
 
-Before producing the final JSON:
-
-1. Did I cover every explicit functional flow?
-
-2. Did I avoid inventing unsupported validation rules?
-
-3. Did I avoid inventing exact limits?
-
-4. Did I avoid duplicate scenarios?
-
-5. Does every test case have appropriate test data?
-
-6. Does every expected result come from the requirement?
-
-7. Does every test case have priority?
-
-8. Does every test case have coverage_level?
-
-9. Did I consider meaningful positive and negative scenarios?
-
-10. Did I avoid creating artificial scenarios?
+1. Did I analyze EVERY supplied module?
+2. Did I cover every explicit functional flow?
+3. Did I avoid invented rules?
+4. Did I include meaningful negative scenarios?
+5. Did I avoid duplicates?
+6. Does every test case have relevant test data?
+7. Is every expected result requirement-based?
+8. Did I keep module names accurate?
+9. Did I avoid artificial scenarios?
+10. Did I report missing information separately?
 
 Return ONLY JSON.
 """
 
     response = ask_ai(prompt)
 
-    # ========================================================
-    # PARSE AI RESPONSE
-    # ========================================================
+    result = parse_ai_json(response)
 
-    try:
-
-        result = json.loads(response)
-
-    except json.JSONDecodeError:
-
+    if not isinstance(result, dict):
         return {
-            "module": "AI Analysis",
+            "modules": []
+        }
+
+    modules = result.get("modules", [])
+
+    if not isinstance(modules, list):
+        modules = []
+
+    return {
+        "modules": modules
+    }
+
+
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
+
+def analyze_requirement_with_ai(
+    requirement: str,
+    coverage_mode: str = "standard"
+):
+    """
+    Full MSSPL SmartQA analysis pipeline.
+
+    Stage 1:
+        Discover all modules.
+
+    Stage 2:
+        Generate test scenarios for module batches.
+
+    Stage 3:
+        Normalize, deduplicate and combine results.
+    """
+
+    if not requirement or not requirement.strip():
+        return {
+            "module": "Requirement Analysis",
+            "actor": "User",
+            "complexity": "Low",
+            "coverage_score": 0,
+            "scenario_count": 0,
+            "functional_requirements": [],
+            "qa_risks": [],
+            "missing_information": [
+                "Requirement is empty."
+            ],
+            "coverage_gaps": [],
+            "test_cases": []
+        }
+
+    # ========================================================
+    # STAGE 1: MODULE DISCOVERY
+    # ========================================================
+
+    print("\n==============================================")
+    print("MSSPL SmartQA - Module Discovery")
+    print("==============================================")
+
+    discovery = discover_requirement_modules(
+        requirement
+    )
+
+    modules = discovery.get(
+        "modules",
+        []
+    )
+
+    global_missing_information = discovery.get(
+        "global_missing_information",
+        []
+    )
+
+    print(
+        f"Modules identified: {len(modules)}"
+    )
+
+    for index, module in enumerate(
+        modules,
+        start=1
+    ):
+        print(
+            f"{index}. {module.get('module')}"
+        )
+
+    if not modules:
+        return {
+            "module": "Requirement Analysis",
             "actor": "User",
             "complexity": "Medium",
             "coverage_score": 0,
@@ -594,192 +790,472 @@ Return ONLY JSON.
             "functional_requirements": [],
             "qa_risks": [],
             "missing_information": [
-                "AI returned an unexpected response format."
+                "AI could not identify modules from the requirement."
             ],
             "coverage_gaps": [
-                "Coverage could not be calculated."
+                "Module discovery failed."
             ],
-            "test_cases": [],
-            "raw_ai_response": response
+            "test_cases": []
         }
 
     # ========================================================
-    # SAFE DEFAULTS
+    # STAGE 2: MODULE BATCH GENERATION
     # ========================================================
 
-    result.setdefault(
-        "module",
-        "Unknown"
+    all_module_results = []
+
+    # Process several modules per AI request.
+    # This reduces latency compared with one request per module.
+    batch_size = 4
+
+    total_batches = (
+        (len(modules) + batch_size - 1)
+        // batch_size
     )
 
-    result.setdefault(
-        "actor",
-        "User"
-    )
+    for batch_index in range(
+        0,
+        len(modules),
+        batch_size
+    ):
 
-    result.setdefault(
-        "complexity",
-        "Medium"
-    )
+        batch = modules[
+            batch_index:
+            batch_index + batch_size
+        ]
 
-    result.setdefault(
-        "coverage_score",
-        0
-    )
+        current_batch_number = (
+            batch_index // batch_size
+        ) + 1
 
-    result.setdefault(
-        "scenario_count",
-        0
-    )
+        print(
+            f"\nAnalyzing module batch "
+            f"{current_batch_number}/{total_batches}"
+        )
 
-    result.setdefault(
-        "functional_requirements",
-        []
-    )
+        result = generate_module_test_cases(
+            batch,
+            global_missing_information
+        )
 
-    result.setdefault(
-        "qa_risks",
-        []
-    )
+        batch_modules = result.get(
+            "modules",
+            []
+        )
 
-    result.setdefault(
-        "missing_information",
-        []
-    )
-
-    result.setdefault(
-        "coverage_gaps",
-        []
-    )
-
-    result.setdefault(
-        "test_cases",
-        []
-    )
+        if isinstance(
+            batch_modules,
+            list
+        ):
+            all_module_results.extend(
+                batch_modules
+            )
 
     # ========================================================
-    # NORMALIZE ANALYSIS
+    # STAGE 3: COMBINE RESULTS
     # ========================================================
-
-    result["complexity"] = normalize_complexity(
-        result.get("complexity")
-    )
-
-    result["coverage_score"] = normalize_coverage_score(
-        result.get("coverage_score")
-    )
-
-    # ========================================================
-    # TEST CASE PROCESSING
-    # ========================================================
-
-    ai_test_cases = result.get(
-        "test_cases",
-        []
-    )
-
-    if not isinstance(ai_test_cases, list):
-        ai_test_cases = []
 
     normalized_cases = []
+
+    functional_requirements = []
+    qa_risks = []
+    missing_information = list(
+        global_missing_information
+    )
+    coverage_gaps = []
+
+    module_names = []
+    actors = []
+    complexity_values = []
+    coverage_scores = []
 
     today = datetime.now().strftime(
         "%d-%m-%Y"
     )
 
-    for test_case in ai_test_cases:
+    # ========================================================
+    # COLLECT MODULE METADATA
+    # ========================================================
 
-        if not is_valid_test_case(test_case):
-            continue
+    for module_result in all_module_results:
 
-        # Prevent duplicates
-        if is_duplicate_case(
-            normalized_cases,
-            test_case
+        if not isinstance(
+            module_result,
+            dict
         ):
             continue
 
-        normalized_case = {}
-
-        # ----------------------------------------------------
-        # COMPANY-FACING FIELDS
-        # ----------------------------------------------------
-
-        # Date is ALWAYS generated by Python.
-        normalized_case["date"] = today
-
-        normalized_case["test_case_id"] = (
-            f"TC_{len(normalized_cases) + 1:03d}"
-        )
-
-        normalized_case["module"] = test_case.get(
-            "module",
-            result.get(
+        module_name = str(
+            module_result.get(
                 "module",
-                "Unknown"
-            )
-        )
-
-        normalized_case["test_case_type"] = (
-            normalize_test_case_type(
-                test_case.get(
-                    "test_case_type"
-                )
-            )
-        )
-
-        normalized_case["test_case"] = str(
-            test_case.get(
-                "test_case"
+                ""
             )
         ).strip()
 
-        normalized_case["test_data"] = (
-            clean_test_data(
-                test_case.get(
-                    "test_data"
-                )
+        if module_name:
+            module_names.append(
+                module_name
             )
-        )
 
-        normalized_case["expected_result"] = str(
-            test_case.get(
-                "expected_result"
+        actor = str(
+            module_result.get(
+                "actor",
+                "User"
             )
         ).strip()
 
-        # ----------------------------------------------------
-        # INTERNAL SMARTQA METADATA
-        # ----------------------------------------------------
+        if actor:
+            actors.append(actor)
 
-        normalized_case["priority"] = (
-            normalize_priority(
-                test_case.get(
-                    "priority"
+        complexity_values.append(
+            normalize_complexity(
+                module_result.get(
+                    "complexity",
+                    "Medium"
                 )
             )
         )
 
-        normalized_case["coverage_level"] = (
-            normalize_coverage_level(
-                test_case.get(
-                    "coverage_level"
+        coverage_scores.append(
+            normalize_coverage_score(
+                module_result.get(
+                    "coverage_score",
+                    0
                 )
             )
         )
 
-        normalized_cases.append(
-            normalized_case
+        for item in module_result.get(
+            "functional_requirements",
+            []
+        ):
+
+            if str(item).strip():
+                functional_requirements.append(
+                    str(item).strip()
+                )
+
+        for item in module_result.get(
+            "qa_risks",
+            []
+        ):
+
+            if str(item).strip():
+                qa_risks.append(
+                    str(item).strip()
+                )
+
+        for item in module_result.get(
+            "missing_information",
+            []
+        ):
+
+            if str(item).strip():
+                missing_information.append(
+                    str(item).strip()
+                )
+
+        for item in module_result.get(
+            "coverage_gaps",
+            []
+        ):
+
+            if str(item).strip():
+                coverage_gaps.append(
+                    str(item).strip()
+                )
+
+        ai_test_cases = module_result.get(
+            "test_cases",
+            []
         )
+
+        if not isinstance(
+            ai_test_cases,
+            list
+        ):
+            continue
+
+        for test_case in ai_test_cases:
+
+            if not is_valid_test_case(
+                test_case
+            ):
+                continue
+
+            if is_duplicate_case(
+                normalized_cases,
+                test_case
+            ):
+                continue
+
+            case_module = str(
+                test_case.get(
+                    "module",
+                    module_name or "Unknown"
+                )
+            ).strip()
+
+            normalized_case = {
+                "date": today,
+
+                "test_case_id": (
+                    f"TC_{len(normalized_cases) + 1:03d}"
+                ),
+
+                "module": (
+                    case_module
+                    if case_module
+                    else "Unknown"
+                ),
+
+                "test_case_type": (
+                    normalize_test_case_type(
+                        test_case.get(
+                            "test_case_type"
+                        )
+                    )
+                ),
+
+                "test_case": str(
+                    test_case.get(
+                        "test_case"
+                    )
+                ).strip(),
+
+                "test_data": clean_test_data(
+                    test_case.get(
+                        "test_data"
+                    )
+                ),
+
+                "expected_result": str(
+                    test_case.get(
+                        "expected_result"
+                    )
+                ).strip(),
+
+                "priority": (
+                    normalize_priority(
+                        test_case.get(
+                            "priority"
+                        )
+                    )
+                ),
+
+                "coverage_level": (
+                    normalize_coverage_level(
+                        test_case.get(
+                            "coverage_level"
+                        )
+                    )
+                )
+            }
+
+            normalized_cases.append(
+                normalized_case
+            )
+
+    # ========================================================
+    # REMOVE DUPLICATES FROM METADATA
+    # ========================================================
+
+    def unique_list(values):
+        result = []
+        seen = set()
+
+        for value in values:
+
+            normalized = normalize_text(
+                value
+            )
+
+            if not normalized:
+                continue
+
+            if normalized in seen:
+                continue
+
+            seen.add(normalized)
+            result.append(value)
+
+        return result
+
+    module_names = unique_list(
+        module_names
+    )
+
+    actors = unique_list(
+        actors
+    )
+
+    functional_requirements = unique_list(
+        functional_requirements
+    )
+
+    qa_risks = unique_list(
+        qa_risks
+    )
+
+    missing_information = unique_list(
+        missing_information
+    )
+
+    coverage_gaps = unique_list(
+        coverage_gaps
+    )
+
+    # ========================================================
+    # OVERALL COMPLEXITY
+    # ========================================================
+
+    if "High" in complexity_values:
+        overall_complexity = "High"
+
+    elif "Medium" in complexity_values:
+        overall_complexity = "Medium"
+
+    else:
+        overall_complexity = "Low"
+
+    # ========================================================
+    # OVERALL COVERAGE SCORE
+    # ========================================================
+
+    if coverage_scores:
+        overall_coverage_score = round(
+            sum(coverage_scores)
+            / len(coverage_scores)
+        )
+    else:
+        overall_coverage_score = 0
+
+    # ========================================================
+    # MODULE COVERAGE SAFETY CHECK
+    # ========================================================
+
+    discovered_module_names = {
+        normalize_text(
+            module.get(
+                "module",
+                ""
+            )
+        )
+        for module in modules
+        if module.get("module")
+    }
+
+    generated_module_names = {
+        normalize_text(
+            case.get(
+                "module",
+                ""
+            )
+        )
+        for case in normalized_cases
+        if case.get("module")
+    }
+
+    modules_without_cases = (
+        discovered_module_names
+        - generated_module_names
+    )
+
+    if modules_without_cases:
+
+        coverage_gaps.append(
+            "The following identified modules did not "
+            "produce test cases: "
+            + ", ".join(
+                sorted(
+                    modules_without_cases
+                )
+            )
+        )
+
+    # ========================================================
+    # FINAL MODULE LABEL
+    # ========================================================
+
+    if len(module_names) == 1:
+        final_module = module_names[0]
+
+    elif module_names:
+        final_module = (
+            f"Multiple Modules ({len(module_names)})"
+        )
+
+    else:
+        final_module = "Requirement Analysis"
+
+    # ========================================================
+    # FINAL ACTOR
+    # ========================================================
+
+    if len(actors) == 1:
+        final_actor = actors[0]
+
+    elif actors:
+        final_actor = ", ".join(actors)
+
+    else:
+        final_actor = "User"
 
     # ========================================================
     # FINAL RESULT
     # ========================================================
 
-    result["test_cases"] = normalized_cases
+    final_result = {
+        "module": final_module,
 
-    result["scenario_count"] = (
-        len(normalized_cases)
+        "actor": final_actor,
+
+        "complexity": overall_complexity,
+
+        "coverage_score": (
+            normalize_coverage_score(
+                overall_coverage_score
+            )
+        ),
+
+        "scenario_count": len(
+            normalized_cases
+        ),
+
+        "functional_requirements": (
+            functional_requirements
+        ),
+
+        "qa_risks": qa_risks,
+
+        "missing_information": (
+            missing_information
+        ),
+
+        "coverage_gaps": (
+            coverage_gaps
+        ),
+
+        "test_cases": normalized_cases
+    }
+
+    print("\n==============================================")
+    print("MSSPL SmartQA - Analysis Complete")
+    print("==============================================")
+
+    print(
+        f"Modules discovered: "
+        f"{len(module_names)}"
     )
 
-    return result
+    print(
+        f"Test cases generated: "
+        f"{len(normalized_cases)}"
+    )
+
+    print(
+        f"Coverage score: "
+        f"{final_result['coverage_score']}"
+    )
+
+    return final_result
